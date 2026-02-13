@@ -1,0 +1,33 @@
+{
+  "name": "voice-terminal",
+  "module": "src/server.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "npx tsx src/server-node.ts",
+    "start:multi": "npx tsx src/server-multiuser.ts",
+    "start:bun": "bun run src/server.ts",
+    "dev": "npx tsx --watch src/server-node.ts",
+    "test": "bun run src/test-all.ts",
+    "test:tts": "bun run src/test-tts.ts",
+    "test:asr": "bun run src/test-asr.ts",
+    "test:server": "bun run src/test-server.ts",
+    "test:e2e": "bun run src/test-e2e.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.2.2",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.4",
+    "node-pty": "^1.1.0",
+    "ws": "^8.19.0"
+  }
+}

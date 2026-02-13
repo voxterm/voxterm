@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Voice Terminal</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; height: 100vh; display: flex; flex-direction: column; touch-action: manipulation; overflow: hidden; }
+    #terminal-frame { flex: 1; border: none; min-height: 0; overflow: hidden; }
+    #voice-bar {
+      background: #16213e; padding: 10px 16px; display: flex; align-items: center; gap: 10px;
+      border-top: 2px solid #0f3460; color: #fff; font-family: system-ui; flex-shrink: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #voice-bar.recording { background: #1a3a2e; border-top-color: #4ade80; }
+    #status { padding: 6px 12px; background: #333; border-radius: 20px; font-size: 14px; white-space: nowrap; text-align: center; }
+    #status.recording { background: #4ade80; color: #000; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+    #text { flex: 1; font-size: 14px; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 60px; }
+    @media (max-width: 600px) {
+      #voice-bar { padding: 8px 8px; gap: 6px; }
+      #status { font-size: 12px; padding: 6px 8px; }
+      #text { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <iframe id="terminal-frame" src="http://localhost:7681"></iframe>
+  <div id="voice-bar">
+    <div id="status">Hold Ctrl to speak</div>
+    <div id="text"></div>
+  </div>
+  <script>
+    const status = document.getElementById('status');
+    const text = document.getElementById('text');
+    const frame = document.getElementById('terminal-frame');
+
+    let voiceWs, mediaRecorder, audioChunks = [], isRecording = false, audioContext;
+
+    // Voice WebSocket
+    function connectVoice() {
+      voiceWs = new WebSocket(`ws://${location.hostname}:3000/ws/voice`);
+      voiceWs.onmessage = (e) => {
+        if (e.data instanceof Blob) { new Audio(URL.createObjectURL(e.data)).play(); return; }
+        const d = JSON.parse(e.data);
+        if (d.type === 'asr' && d.text) {
+          text.textContent = 'Recognized: ' + d.text;
+          // Copy to clipboard - user can paste with Cmd+V
+          navigator.clipboard.writeText(d.text);
+          status.textContent = 'Copied! Press Cmd+V in terminal';
+          setTimeout(() => { status.textContent = isMobile ? 'Hold here to speak' : 'Hold Ctrl to speak'; }, 3000);
+        }
+      };
+      voiceWs.onclose = () => setTimeout(connectVoice, 2000);
+    }
+
+    // Audio
+    async function initAudio() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+      audioContext = new AudioContext({ sampleRate: 16000 });
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(audioChunks, { type: 'audio/webm' });
+        audioChunks = [];
+        const buf = await blob.arrayBuffer();
+        const audio = await audioContext.decodeAudioData(buf);
+        const data = audio.getChannelData(0);
+        const pcm = new Int16Array(data.length);
+        for (let i = 0; i < data.length; i++) pcm[i] = Math.max(-1, Math.min(1, data[i])) * (data[i] < 0 ? 0x8000 : 0x7FFF);
+        if (voiceWs?.readyState === 1) voiceWs.send(pcm.buffer);
+        status.textContent = 'Processing...';
+      };
+    }
+
+    function startRec() {
+      if (!mediaRecorder || isRecording) return;
+      audioChunks = [];
+      mediaRecorder.start(100);
+      isRecording = true;
+      status.textContent = 'Recording...';
+      status.classList.add('recording');
+    }
+
+    function stopRec() {
+      if (!mediaRecorder || !isRecording) return;
+      mediaRecorder.stop();
+      isRecording = false;
+      status.classList.remove('recording');
+    }
+
+    // Ctrl key
+    let ctrl = false;
+    document.addEventListener('keydown', (e) => { if (e.key === 'Control' && !ctrl) { ctrl = true; startRec(); } }, true);
+    document.addEventListener('keyup', (e) => { if (e.key === 'Control' && ctrl) { ctrl = false; stopRec(); } }, true);
+
+    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+    // Mobile: entire voice bar is hold-to-speak
+    const voiceBar = document.getElementById('voice-bar');
+    voiceBar.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      startRec();
+      voiceBar.classList.add('recording');
+    }, { passive: false });
+    voiceBar.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      stopRec();
+      voiceBar.classList.remove('recording');
+    }, { passive: false });
+    voiceBar.addEventListener('touchcancel', () => {
+      stopRec();
+      voiceBar.classList.remove('recording');
+    });
+
+    if (isMobile) {
+      status.textContent = 'Hold here to speak';
+    }
+
+    connectVoice();
+    initAudio();
+  </script>
+</body>
+</html>
