@@ -4,6 +4,14 @@
  * Full control over terminal input - ASR text goes directly to PTY
  */
 
+// Prevent unhandled errors from crashing the server
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err.message);
+});
+process.on('unhandledRejection', (err: any) => {
+  console.error('Unhandled rejection:', err?.message || err);
+});
+
 import 'dotenv/config';
 import * as http from 'http';
 import * as pty from 'node-pty';
@@ -254,7 +262,7 @@ const loginHtml = `<!DOCTYPE html>
   <script>
     function login() {
       const pwd = document.getElementById('password').value;
-      fetch('login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
+      fetch('/terminal/login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
         .then(r => r.json())
         .then(d => {
           if (d.success) {
@@ -674,8 +682,8 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Handle login POST
-  if (req.url === '/login' && req.method === 'POST') {
+  // Handle login POST (accept both direct and proxy-rewritten paths)
+  if ((req.url === '/login' || req.url === '/terminal/login') && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
