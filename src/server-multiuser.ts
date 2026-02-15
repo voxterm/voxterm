@@ -5,6 +5,19 @@
  * - Admin-managed allowlist
  */
 
+// Prevent unhandled errors from crashing the server
+// IMPORTANT: Ignore EPIPE errors to avoid infinite loop when stderr pipe breaks
+// (console.error on broken pipe → EPIPE → uncaughtException → console.error → ...)
+process.on('SIGPIPE', () => {}); // Ignore broken pipe signals
+process.on('uncaughtException', (err) => {
+  if ((err as any)?.code === 'EPIPE') return;
+  try { console.error('Uncaught exception:', err.message); } catch {}
+});
+process.on('unhandledRejection', (err: any) => {
+  if (err?.code === 'EPIPE') return;
+  try { console.error('Unhandled rejection:', err?.message || err); } catch {}
+});
+
 import 'dotenv/config';
 import * as http from 'http';
 import * as pty from 'node-pty';
@@ -49,23 +62,28 @@ const authTokens = new Map<string, { username: string; expires: number }>();
 // Voice clients: id -> { ws, sessionId }
 const voiceClients = new Map<string, { ws: WebSocket; sessionId: string }>();
 
-// Load allowlist
+// Cached allowlist - loaded once, invalidated on write
+let _allowlistCache: string[] | null = null;
+
 function loadAllowlist(): string[] {
+  if (_allowlistCache) return _allowlistCache;
   try {
     const data = fs.readFileSync(ALLOWLIST_PATH, 'utf-8');
-    return JSON.parse(data);
+    _allowlistCache = JSON.parse(data);
+    return _allowlistCache!;
   } catch {
+    _allowlistCache = [];
     return [];
   }
 }
 
 function saveAllowlist(users: string[]) {
+  _allowlistCache = users;
   fs.writeFileSync(ALLOWLIST_PATH, JSON.stringify(users, null, 2));
 }
 
 function isUserAllowed(username: string): boolean {
-  const allowlist = loadAllowlist();
-  return allowlist.includes(username);
+  return loadAllowlist().includes(username);
 }
 
 function addUserToAllowlist(username: string): boolean {
@@ -79,11 +97,10 @@ function addUserToAllowlist(username: string): boolean {
 }
 
 function removeUserFromAllowlist(username: string): boolean {
-  let allowlist = loadAllowlist();
-  const initial = allowlist.length;
-  allowlist = allowlist.filter(u => u !== username);
-  if (allowlist.length < initial) {
-    saveAllowlist(allowlist);
+  const allowlist = loadAllowlist();
+  const filtered = allowlist.filter(u => u !== username);
+  if (filtered.length < allowlist.length) {
+    saveAllowlist(filtered);
     return true;
   }
   return false;

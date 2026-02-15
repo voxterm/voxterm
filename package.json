@@ -6,7 +6,6 @@
   "scripts": {
     "start": "npx tsx src/server-node.ts",
     "start:multi": "npx tsx src/server-multiuser.ts",
-    "start:bun": "bun run src/server.ts",
     "dev": "npx tsx --watch src/server-node.ts",
     "test": "bun run src/test-all.ts",
     "test:tts": "bun run src/test-tts.ts",

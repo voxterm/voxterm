@@ -5,11 +5,16 @@
  */
 
 // Prevent unhandled errors from crashing the server
+// IMPORTANT: Ignore EPIPE errors to avoid infinite loop when stderr pipe breaks
+// (console.error on broken pipe → EPIPE → uncaughtException → console.error → ...)
+process.on('SIGPIPE', () => {}); // Ignore broken pipe signals
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err.message);
+  if ((err as any)?.code === 'EPIPE') return; // Silently ignore broken pipes
+  try { console.error('Uncaught exception:', err.message); } catch {}
 });
 process.on('unhandledRejection', (err: any) => {
-  console.error('Unhandled rejection:', err?.message || err);
+  if (err?.code === 'EPIPE') return;
+  try { console.error('Unhandled rejection:', err?.message || err); } catch {}
 });
 
 import 'dotenv/config';
@@ -40,13 +45,18 @@ const VOLCANO_ASR_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmode
 interface Session {
   pty: pty.IPty;
   clients: Set<WebSocket>;
-  scrollback: string;
+  scrollbackChunks: string[];
+  scrollbackLen: number;
   name: string;
   createdAt: number;
 }
 const sessions = new Map<string, Session>();
 const MAX_SCROLLBACK = 50000;
 let sessionCounter = 0;
+
+// Sessions HTML cache - invalidated when sessions change
+let sessionsHtmlCache: string | null = null;
+function invalidateSessionsCache() { sessionsHtmlCache = null; }
 
 // --- Volcano ASR streaming protocol (native TypeScript) ---
 
@@ -187,7 +197,8 @@ function createSession(id: string): Session {
   const session: Session = {
     pty: ptyProcess,
     clients: new Set(),
-    scrollback: '',
+    scrollbackChunks: [],
+    scrollbackLen: 0,
     name: `Session ${sessionCounter}`,
     createdAt: Date.now(),
   };
@@ -196,10 +207,14 @@ function createSession(id: string): Session {
 
   // Broadcast PTY output to all connected clients and save to scrollback
   ptyProcess.onData((data) => {
-    // Save to scrollback buffer
-    session.scrollback += data;
-    if (session.scrollback.length > MAX_SCROLLBACK) {
-      session.scrollback = session.scrollback.slice(-MAX_SCROLLBACK);
+    // Append to scrollback chunks (avoids repeated string concat+slice)
+    session.scrollbackChunks.push(data);
+    session.scrollbackLen += data.length;
+    // Compact only when we exceed 2x the limit
+    if (session.scrollbackLen > MAX_SCROLLBACK * 2) {
+      const full = session.scrollbackChunks.join('').slice(-MAX_SCROLLBACK);
+      session.scrollbackChunks = [full];
+      session.scrollbackLen = full.length;
     }
 
     const message = JSON.stringify({ type: 'output', data });
@@ -213,12 +228,14 @@ function createSession(id: string): Session {
   ptyProcess.onExit(({ exitCode }) => {
     console.log(`PTY exited with code ${exitCode}`);
     sessions.delete(id);
+    invalidateSessionsCache();
     for (const client of session.clients) {
       client.close();
     }
   });
 
   sessions.set(id, session);
+  invalidateSessionsCache();
   return session;
 }
 
@@ -280,6 +297,7 @@ const loginHtml = `<!DOCTYPE html>
 
 // Session chooser HTML page - generated dynamically with server-side rendering
 function buildSessionsHtml(): string {
+  if (sessionsHtmlCache) return sessionsHtmlCache;
   const sessionList = Array.from(sessions.entries()).map(([id, s]) => ({
     id, name: s.name, createdAt: s.createdAt, clients: s.clients.size,
   }));
@@ -312,7 +330,7 @@ function buildSessionsHtml(): string {
     }
   }
 
-  return `<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
@@ -370,6 +388,8 @@ function buildSessionsHtml(): string {
   </div>
 </body>
 </html>`;
+  sessionsHtmlCache = html;
+  return html;
 }
 
 // Terminal HTML page
@@ -569,10 +589,7 @@ const indexHtml = `<!DOCTYPE html>
         // Option combined with another key - cancel recording
         altCombined = true;
         if (isRecording) {
-          mediaRecorder.stop();
-          isRecording = false;
-          audioChunks = []; // Discard
-          status.classList.remove('recording');
+          stopRec();
           status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
         }
       }
@@ -584,10 +601,7 @@ const indexHtml = `<!DOCTYPE html>
         if (altCombined || holdDuration < 800) {
           // Combined with other key or too short - discard
           if (isRecording) {
-            mediaRecorder.stop();
-            isRecording = false;
-            audioChunks = [];
-            status.classList.remove('recording');
+            stopRec();
             status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
           }
         } else {
@@ -674,7 +688,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  console.log(`HTTP ${req.method} ${req.url} - Cookie: ${req.headers.cookie?.substring(0,60) || 'none'}`);
+  // Only log non-routine requests
+  if (req.url !== '/health' && !req.url?.startsWith('/terminal?session=')) {
+    console.log(`HTTP ${req.method} ${req.url}`);
+  }
 
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -751,11 +768,13 @@ terminalWss.on('connection', (ws, req) => {
 
   const session = getSession(sessionId);
   session.clients.add(ws);
+  invalidateSessionsCache();
   console.log(`Terminal client connected: ${sessionId}`);
 
   // Send scrollback history to new client
-  if (session.scrollback) {
-    ws.send(JSON.stringify({ type: 'output', data: session.scrollback }));
+  if (session.scrollbackLen > 0) {
+    const scrollback = session.scrollbackChunks.join('');
+    ws.send(JSON.stringify({ type: 'output', data: scrollback.length > MAX_SCROLLBACK ? scrollback.slice(-MAX_SCROLLBACK) : scrollback }));
   }
 
   ws.on('message', (message) => {
@@ -783,6 +802,7 @@ terminalWss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     session.clients.delete(ws);
+    invalidateSessionsCache();
     console.log(`Terminal client disconnected: ${sessionId}`);
   });
 });
