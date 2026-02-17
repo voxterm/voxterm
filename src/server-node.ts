@@ -27,6 +27,9 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
+import xtermHeadless from '@xterm/headless';
+const HeadlessTerminal = xtermHeadless.Terminal;
+import { SerializeAddon } from '@xterm/addon-serialize';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,13 +48,12 @@ const VOLCANO_ASR_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmode
 interface Session {
   pty: pty.IPty;
   clients: Set<WebSocket>;
-  scrollbackChunks: string[];
-  scrollbackLen: number;
+  headlessTerm: InstanceType<typeof HeadlessTerminal>;
+  serializeAddon: InstanceType<typeof SerializeAddon>;
   name: string;
   createdAt: number;
 }
 const sessions = new Map<string, Session>();
-const MAX_SCROLLBACK = 50000;
 let sessionCounter = 0;
 
 // Sessions HTML cache - invalidated when sessions change
@@ -100,10 +102,11 @@ function parseAsrResponse(data: Buffer): { msgType: number; result?: any; error?
 interface AsrSession {
   volcanoWs: WebSocket | null;
   ready: boolean;
+  pendingChunks: Buffer[];
 }
 
 function startAsrSession(clientWs: WebSocket): AsrSession {
-  const asrSession: AsrSession = { volcanoWs: null, ready: false };
+  const asrSession: AsrSession = { volcanoWs: null, ready: false, pendingChunks: [] };
 
   const headers = {
     'X-Api-App-Key': VOLCANO_APP_ID,
@@ -131,7 +134,14 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
     };
     volcanoWs.send(buildFullClientRequest(initPayload));
     asrSession.ready = true;
-    console.log('ASR session connected to Volcano');
+    // Flush any audio chunks that arrived while connecting
+    const pending = asrSession.pendingChunks;
+    asrSession.pendingChunks = [];
+    for (const chunk of pending) {
+      const isLast = chunk.length === 0; // empty buffer = final sentinel
+      volcanoWs.send(buildAudioRequest(chunk, isLast));
+    }
+    console.log(`ASR session connected to Volcano (flushed ${pending.length} buffered chunks)`);
   });
 
   volcanoWs.on('message', (data: Buffer) => {
@@ -190,32 +200,31 @@ function createSession(id: string): Session {
       ) as { [key: string]: string },
       TERM: 'xterm-256color',
       SHELL: '/bin/bash',
+      PS1: '\\[\\033[32m\\]\\u\\[\\033[0m\\]:\\[\\033[34m\\]\\W\\[\\033[0m\\]\\$ ',
     },
   });
 
   sessionCounter++;
+
+  // Headless terminal tracks screen state for efficient reconnection
+  const headlessTerm = new HeadlessTerminal({ cols: 120, rows: 30, scrollback: 500, allowProposedApi: true });
+  const serializeAddon = new SerializeAddon();
+  headlessTerm.loadAddon(serializeAddon);
+
   const session: Session = {
     pty: ptyProcess,
     clients: new Set(),
-    scrollbackChunks: [],
-    scrollbackLen: 0,
+    headlessTerm,
+    serializeAddon,
     name: `Session ${sessionCounter}`,
     createdAt: Date.now(),
   };
 
   console.log(`Created PTY session: ${id} - ${session.name}`);
 
-  // Broadcast PTY output to all connected clients and save to scrollback
+  // Broadcast PTY output to all connected clients and feed headless terminal
   ptyProcess.onData((data) => {
-    // Append to scrollback chunks (avoids repeated string concat+slice)
-    session.scrollbackChunks.push(data);
-    session.scrollbackLen += data.length;
-    // Compact only when we exceed 2x the limit
-    if (session.scrollbackLen > MAX_SCROLLBACK * 2) {
-      const full = session.scrollbackChunks.join('').slice(-MAX_SCROLLBACK);
-      session.scrollbackChunks = [full];
-      session.scrollbackLen = full.length;
-    }
+    session.headlessTerm.write(data);
 
     const message = JSON.stringify({ type: 'output', data });
     for (const client of session.clients) {
@@ -227,6 +236,7 @@ function createSession(id: string): Session {
 
   ptyProcess.onExit(({ exitCode }) => {
     console.log(`PTY exited with code ${exitCode}`);
+    session.headlessTerm.dispose();
     sessions.delete(id);
     invalidateSessionsCache();
     for (const client of session.clients) {
@@ -420,11 +430,19 @@ const indexHtml = `<!DOCTYPE html>
     #font-size { color: #888; font-size: 12px; min-width: 36px; text-align: center; }
     #font-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
     #back-btn { color: #4ade80; font-size: 13px; text-decoration: none; padding: 6px 10px; background: #1a1a2e; border-radius: 6px; white-space: nowrap; flex-shrink: 0; }
-    @media (max-width: 600px) {
-      #voice-bar { padding: 8px 8px; gap: 6px; }
-      #status { font-size: 12px; padding: 6px 8px; }
-      #text { display: none; }
-    }
+    .key-btn { background: #333; border: none; color: #fff; min-width: 40px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: system-ui; -webkit-tap-highlight-color: transparent; flex-shrink: 0; padding: 0 8px; }
+    .key-btn:active { background: #4ade80; color: #000; }
+    #special-keys { display: none; align-items: center; gap: 4px; flex-shrink: 0; }
+    #mobile-input { display: none; }
+    #scroll-bottom { background: #333; border: none; color: #fff; min-width: 36px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 16px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; padding: 0; }
+    #scroll-bottom:active { background: #4ade80; color: #000; }
+    body.mobile #voice-bar { padding: 8px 8px; gap: 6px; flex-wrap: wrap; }
+    body.mobile #status { font-size: 12px; padding: 6px 8px; }
+    body.mobile #text { display: none; }
+    body.mobile #special-keys { display: flex; }
+    body.mobile #mobile-input { display: block; flex: 1; min-width: 80px; height: 36px; padding: 0 10px; font-size: 14px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #e0e0e0; font-family: system-ui; outline: none; }
+    body.mobile #mobile-input:focus { border-color: #4ade80; }
+    body.mobile #font-controls { display: none; }
   </style>
 </head>
 <body>
@@ -432,6 +450,14 @@ const indexHtml = `<!DOCTYPE html>
     <div id="terminal"></div>
     <div id="voice-bar">
       <a href="/terminal" id="back-btn">Sessions</a>
+      <div id="special-keys">
+        <button class="key-btn" data-key="esc">Esc</button>
+        <button class="key-btn" data-key="tab">Tab</button>
+        <button class="key-btn" data-key="up">↑</button>
+        <button class="key-btn" data-key="down">↓</button>
+      </div>
+      <input type="text" id="mobile-input" placeholder="Type here..." autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" enterkeyhint="send">
+      <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
       <div id="status">Hold Option to speak</div>
       <div id="text"></div>
       <div id="font-controls">
@@ -451,6 +477,7 @@ const indexHtml = `<!DOCTYPE html>
     };
 
     const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (isMobile) document.body.classList.add('mobile');
     let fontSize = isMobile ? 14 : 21;
     const term = new Terminal({
       cursorBlink: true,
@@ -477,38 +504,98 @@ const indexHtml = `<!DOCTYPE html>
     const sessionId = new URLSearchParams(location.search).get('session');
     if (!sessionId) { location.href = '/terminal'; }
 
-    // Terminal WebSocket
+    // Terminal WebSocket with auto-reconnect
     var wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/terminal/ws?session=' + sessionId;
-    document.getElementById('status').textContent = 'Connecting...';
-    const termWs = new WebSocket(wsUrl);
-    termWs.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'output') term.write(msg.data);
-    };
-    termWs.onopen = () => {
-      document.getElementById('status').textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
-      termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    };
-    termWs.onerror = () => {
-      document.getElementById('status').textContent = 'WS error: ' + wsUrl;
-      document.getElementById('status').style.background = '#f87171';
-    };
-    termWs.onclose = (e) => {
-      document.getElementById('status').textContent = 'WS closed: ' + e.code + ' ' + (e.reason || wsUrl);
-      document.getElementById('status').style.background = '#f97316';
-    };
+    var termWs = null;
+    var isReconnect = false;
 
-    term.onData((data) => {
-      if (termWs.readyState === 1) {
-        termWs.send(JSON.stringify({ type: 'input', data }));
+    function connectTerminal() {
+      document.getElementById('status').textContent = isReconnect ? 'Reconnecting...' : 'Connecting...';
+      termWs = new WebSocket(wsUrl);
+      termWs.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'scrollback') {
+          // Scrollback replay: write with terminal hidden to avoid visual flicker
+          const termEl = document.getElementById('terminal');
+          termEl.style.visibility = 'hidden';
+          if (isReconnect) term.reset();
+          term.write(msg.data, () => {
+            termEl.style.visibility = '';
+            term.scrollToBottom();
+          });
+        } else if (msg.type === 'output') {
+          term.write(msg.data);
+        }
+      };
+      termWs.onopen = () => {
+        document.getElementById('status').textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+        document.getElementById('status').style.background = '';
+        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      };
+      termWs.onerror = () => {
+        document.getElementById('status').textContent = 'WS error';
+        document.getElementById('status').style.background = '#f87171';
+      };
+      termWs.onclose = (e) => {
+        document.getElementById('status').textContent = 'Disconnected - reconnecting...';
+        document.getElementById('status').style.background = '#f97316';
+        isReconnect = true;
+        setTimeout(connectTerminal, 2000);
+      };
+    }
+    connectTerminal();
+
+    function sendInput(data) {
+      if (termWs && termWs.readyState === 1) {
+        termWs.send(JSON.stringify({ type: 'input', data: data }));
       }
+    }
+
+    term.onData((data) => { sendInput(data); });
+
+    // Debounced resize to avoid PTY redraw storms (e.g. mobile keyboard toggle)
+    var resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        fitAddon.fit();
+        if (termWs && termWs.readyState === 1) {
+          termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        }
+      }, 300);
     });
 
-    window.addEventListener('resize', () => {
-      fitAddon.fit();
-      if (termWs.readyState === 1) {
-        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-      }
+    // Special key buttons (Esc, Tab, Up, Down) for mobile
+    var keyMap = { esc: String.fromCharCode(27), tab: String.fromCharCode(9), up: String.fromCharCode(27) + '[A', down: String.fromCharCode(27) + '[B' };
+    document.querySelectorAll('.key-btn').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var seq = keyMap[btn.getAttribute('data-key')];
+        if (seq) sendInput(seq);
+        term.focus();
+      });
+    });
+
+    // Mobile text input - bypasses xterm's broken mobile keyboard handling
+    var mobileInput = document.getElementById('mobile-input');
+    if (mobileInput) {
+      mobileInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          var val = mobileInput.value;
+          if (val) {
+            sendInput(val + String.fromCharCode(13));
+            mobileInput.value = '';
+          }
+        }
+      });
+    }
+
+    // Scroll to bottom button
+    document.getElementById('scroll-bottom').addEventListener('click', function(e) {
+      e.preventDefault();
+      term.scrollToBottom();
+      term.focus();
     });
 
     // Voice setup - streaming ASR (sends PCM in real-time)
@@ -522,6 +609,7 @@ const indexHtml = `<!DOCTYPE html>
       voiceWs.onmessage = (e) => {
         const d = JSON.parse(e.data);
         if (d.type === 'asr' && d.text) {
+          clearTimeout(processingTimeout);
           text.textContent = d.text;
           status.textContent = 'Sending to terminal...';
           if (termWs.readyState === 1) {
@@ -532,7 +620,15 @@ const indexHtml = `<!DOCTYPE html>
           text.textContent = d.text;
         }
       };
-      voiceWs.onclose = () => setTimeout(connectVoice, 2000);
+      voiceWs.onclose = () => {
+        // Reset recording state so we don't get stuck on "Processing..."
+        if (isRecording || status.textContent === 'Processing...') {
+          isRecording = false;
+          status.classList.remove('recording');
+          status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+        }
+        setTimeout(connectVoice, 2000);
+      };
     }
 
     async function initAudio() {
@@ -567,6 +663,7 @@ const indexHtml = `<!DOCTYPE html>
       text.textContent = '';
     }
 
+    var processingTimeout = null;
     function stopRec() {
       if (!isRecording) return;
       isRecording = false;
@@ -574,6 +671,13 @@ const indexHtml = `<!DOCTYPE html>
       if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
       status.classList.remove('recording');
       status.textContent = 'Processing...';
+      // Safety timeout: reset if no ASR result within 10s
+      clearTimeout(processingTimeout);
+      processingTimeout = setTimeout(function() {
+        if (status.textContent === 'Processing...') {
+          status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+        }
+      }, 10000);
     }
 
     let altDown = false, altDownTime = 0, altCombined = false;
@@ -605,7 +709,8 @@ const indexHtml = `<!DOCTYPE html>
             status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
           }
         } else {
-          stopRec(); // Normal stop - send audio
+          // Delay 500ms to capture trailing sound
+          setTimeout(() => stopRec(), 500);
         }
         e.preventDefault();
         e.stopPropagation();
@@ -619,8 +724,11 @@ const indexHtml = `<!DOCTYPE html>
     const voiceBar = document.getElementById('voice-bar');
     const fontControls = document.getElementById('font-controls');
     const backBtn = document.getElementById('back-btn');
+    var specialKeys = document.getElementById('special-keys');
+    var mobileInputEl = document.getElementById('mobile-input');
+    var scrollBtn = document.getElementById('scroll-bottom');
     function isExcluded(el) {
-      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el));
+      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (specialKeys && specialKeys.contains(el)) || el === mobileInputEl || el === scrollBtn;
     }
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
@@ -631,12 +739,17 @@ const indexHtml = `<!DOCTYPE html>
     voiceBar.addEventListener('touchend', (e) => {
       if (isExcluded(e.target)) return;
       e.preventDefault();
-      stopRec();
-      voiceBar.classList.remove('recording');
+      // Delay 500ms to capture trailing sound
+      setTimeout(() => {
+        stopRec();
+        voiceBar.classList.remove('recording');
+      }, 200);
     }, { passive: false });
     voiceBar.addEventListener('touchcancel', () => {
-      stopRec();
-      voiceBar.classList.remove('recording');
+      setTimeout(() => {
+        stopRec();
+        voiceBar.classList.remove('recording');
+      }, 200);
     });
 
     // Update status text for mobile
@@ -701,10 +814,11 @@ const server = http.createServer((req, res) => {
 
   // Handle login POST (accept both direct and proxy-rewritten paths)
   if ((req.url === '/login' || req.url === '/terminal/login') && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
       try {
+        const body = Buffer.concat(chunks).toString();
         const { password } = JSON.parse(body);
         if (password === PASSWORD) {
           res.writeHead(200, {
@@ -721,6 +835,7 @@ const server = http.createServer((req, res) => {
         res.end('Bad request');
       }
     });
+    req.resume(); // Ensure data flows even if buffered
     return;
   }
 
@@ -771,10 +886,14 @@ terminalWss.on('connection', (ws, req) => {
   invalidateSessionsCache();
   console.log(`Terminal client connected: ${sessionId}`);
 
-  // Send scrollback history to new client
-  if (session.scrollbackLen > 0) {
-    const scrollback = session.scrollbackChunks.join('');
-    ws.send(JSON.stringify({ type: 'output', data: scrollback.length > MAX_SCROLLBACK ? scrollback.slice(-MAX_SCROLLBACK) : scrollback }));
+  // Send serialized terminal state (current screen + some scrollback) instead of raw replay
+  try {
+    const serialized = session.serializeAddon.serialize({ scrollback: 500 });
+    if (serialized) {
+      ws.send(JSON.stringify({ type: 'scrollback', data: serialized }));
+    }
+  } catch (e) {
+    console.error('Serialize error:', e);
   }
 
   ws.on('message', (message) => {
@@ -786,6 +905,7 @@ terminalWss.on('connection', (ws, req) => {
         try {
           if (msg.cols > 0 && msg.rows > 0) {
             session.pty.resize(msg.cols, msg.rows);
+            session.headlessTerm.resize(msg.cols, msg.rows);
           }
         } catch (e) {
           // Ignore resize errors (can happen during session transitions)
@@ -829,15 +949,26 @@ voiceWss.on('connection', (ws) => {
         console.log(`ASR streaming started for ${id}`);
       } else if (msg.type === 'asr_end') {
         // Send empty final chunk to signal end of audio
-        if (asrSession?.volcanoWs?.readyState === WebSocket.OPEN) {
-          asrSession.volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
-          console.log(`ASR streaming ended for ${id}`);
+        if (asrSession) {
+          if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
+            asrSession.volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
+            console.log(`ASR streaming ended for ${id}`);
+          } else {
+            // Volcano not ready yet - mark pending end so it's sent after flush
+            asrSession.pendingChunks.push(Buffer.alloc(0)); // sentinel for final
+            console.log(`ASR end queued (Volcano not ready yet) for ${id}`);
+          }
         }
       }
     } else if (message instanceof Buffer) {
       // Binary = raw PCM audio chunk, forward to Volcano
-      if (asrSession?.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
-        asrSession.volcanoWs.send(buildAudioRequest(message, false));
+      if (asrSession) {
+        if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
+          asrSession.volcanoWs.send(buildAudioRequest(message, false));
+        } else {
+          // Buffer chunks while Volcano WebSocket is still connecting
+          asrSession.pendingChunks.push(Buffer.from(message));
+        }
       }
     }
   });

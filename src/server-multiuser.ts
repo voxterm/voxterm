@@ -527,30 +527,44 @@ const indexHtml = `<!DOCTYPE html>
     const authCookie = document.cookie.split(';').find(c => c.trim().startsWith('auth='));
     const authToken = authCookie ? authCookie.split('=')[1] : '';
     
-    // Terminal WebSocket
+    // Terminal WebSocket with auto-reconnect
     const basePath = location.pathname.replace(/\\/$/, '');
-    const termWs = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + basePath + '/ws/terminal?session=' + sessionId + '&token=' + authToken);
-    termWs.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'output') term.write(msg.data);
-    };
-    termWs.onopen = () => {
-      termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    };
-    termWs.onclose = () => {
-      term.write('\\r\\n[Connection closed - reloading...]\\r\\n');
-      setTimeout(() => location.reload(), 2000);
-    };
-    
+    var termWsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + basePath + '/ws/terminal?session=' + sessionId + '&token=' + authToken;
+    var termWs = null;
+    var isReconnect = false;
+
+    function connectTerminal() {
+      termWs = new WebSocket(termWsUrl);
+      termWs.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'scrollback') {
+          const termEl = document.getElementById('terminal');
+          termEl.style.visibility = 'hidden';
+          if (isReconnect) term.reset();
+          term.write(msg.data, () => { termEl.style.visibility = ''; });
+        } else if (msg.type === 'output') {
+          term.write(msg.data);
+        }
+      };
+      termWs.onopen = () => {
+        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      };
+      termWs.onclose = () => {
+        isReconnect = true;
+        setTimeout(connectTerminal, 2000);
+      };
+    }
+    connectTerminal();
+
     term.onData((data) => {
-      if (termWs.readyState === 1) {
+      if (termWs && termWs.readyState === 1) {
         termWs.send(JSON.stringify({ type: 'input', data }));
       }
     });
-    
+
     window.addEventListener('resize', () => {
       fitAddon.fit();
-      if (termWs.readyState === 1) {
+      if (termWs && termWs.readyState === 1) {
         termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
       }
     });
@@ -872,7 +886,7 @@ terminalWss.on('connection', (ws, req) => {
   console.log(`Terminal client connected: ${username} (${sessionId})`);
   
   if (session.scrollback) {
-    ws.send(JSON.stringify({ type: 'output', data: session.scrollback }));
+    ws.send(JSON.stringify({ type: 'scrollback', data: session.scrollback }));
   }
   
   ws.on('message', (msg) => {
