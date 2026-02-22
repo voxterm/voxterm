@@ -1,7 +1,7 @@
 /**
- * Voice Terminal Server (Node.js version)
+ * voxterm — share your terminal over the web, with voice control
  * Uses node-pty + xterm.js
- * Full control over terminal input - ASR text goes directly to PTY
+ * Full control over terminal input — ASR text goes directly to PTY
  */
 
 // Prevent unhandled errors from crashing the server
@@ -1093,7 +1093,7 @@ server.on('upgrade', (request, socket, head) => {
 server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════╗
-║           Voice Terminal Server                ║
+║               voxterm                          ║
 ╠════════════════════════════════════════════════╣
 ║  Web UI:    http://localhost:${PORT}              ║
 ║  Terminal:  ws://localhost:${PORT}/ws/terminal    ║

@@ -1,106 +1,106 @@
-# Voice Terminal
+# voxterm
 
-Web-based terminal with voice input/output support using Volcano Engine (Doubao) TTS/ASR.
+> Share your terminal over the web, with voice control.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+<!-- TODO: Add GIF demo here -->
+<!-- ![voxterm demo](docs/demo.gif) -->
 
 ## Features
 
-- **Web Terminal**: Browser-based terminal via ttyd
-- **Voice Input**: Speech-to-text using Volcano Engine ASR
-- **Voice Output**: Text-to-speech using Volcano Engine TTS (BigModel)
-- **Real-time**: WebSocket-based voice streaming
+- **Voice input** — talk to your terminal (hold Option/Alt key)
+- **Access from anywhere** — built-in Cloudflare Tunnel (`--tunnel`)
+- **Mobile-friendly** — special keys, touch controls, responsive UI
+- **Session persistence** — reconnect without losing state
+- **Password protection** — simple auth out of the box
+- **Zero config** — works immediately, voice is optional
+
+## Quick Start
+
+```bash
+# Install
+npm install
+
+# Start
+npx tsx src/server-node.ts
+
+# Open
+open http://localhost:3000
+```
+
+Default password: `success1000` (change with `AUTH_PASSWORD` env var)
+
+## Docker
+
+```bash
+docker run -p 3000:3000 -e AUTH_PASSWORD=mysecret voxterm
+```
+
+Build it yourself:
+
+```bash
+docker build -t voxterm .
+docker run -p 3000:3000 -e AUTH_PASSWORD=mysecret voxterm
+```
+
+## Remote Access
+
+Use the `--tunnel` flag to expose your terminal over a Cloudflare Tunnel (requires [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)):
+
+```bash
+npx tsx src/server-node.ts --tunnel
+```
+
+This prints a public URL anyone can use to access your terminal (password-protected).
+
+## Voice Setup (Optional)
+
+Voice input uses [Volcano Engine](https://www.volcengine.com/) for speech recognition. It's entirely optional — voxterm works perfectly as a plain web terminal without it.
+
+To enable voice:
+
+1. Create a Volcano Engine account
+2. Get your App ID and Token
+3. Set environment variables:
+
+```bash
+VOLCANO_APP_ID=your_app_id
+VOLCANO_TOKEN=your_token
+```
+
+Hold **Option** (Mac) or **Alt** (Windows/Linux) to record, release to send.
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | Server port |
+| `AUTH_PASSWORD` | `success1000` | Login password |
+| `SHELL_CMD` | `bash` | Shell to spawn |
+| `VOLCANO_APP_ID` | — | Volcano Engine app ID (for voice) |
+| `VOLCANO_TOKEN` | — | Volcano Engine token (for voice) |
+| `VOLCANO_ASR_RESOURCE_ID` | `volc.bigasr.sauc.duration` | ASR resource ID |
+| `CLOUDFLARE_TUNNEL` | — | Set to `1` to enable tunnel without flag |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│              Browser                     │
-│  ┌─────────┐  ┌───────┐  ┌──────────┐  │
-│  │ xterm.js│  │ Record│  │ Audio    │  │
-│  │ Terminal│  │ Button│  │ Playback │  │
-│  └────┬────┘  └───┬───┘  └────┬─────┘  │
-│       │           │           │        │
-│       └───────────┼───────────┘        │
-│                   │ WebSocket          │
-└───────────────────┼────────────────────┘
-                    │
-┌───────────────────┼────────────────────┐
-│              Server                     │
-│  ┌────────────────┴───────────────┐    │
-│  │         Bun.serve()            │    │
-│  │  /ws/voice  │  /api/tts|asr    │    │
-│  └──────┬──────┴─────────┬────────┘    │
-│         │                │             │
-│  ┌──────▼──────┐  ┌──────▼──────┐     │
-│  │    ttyd     │  │   Volcano   │     │
-│  │   (bash)    │  │   TTS/ASR   │     │
-│  └─────────────┘  └─────────────┘     │
-└────────────────────────────────────────┘
+Browser (xterm.js)
+    │
+    ├── WebSocket /ws/terminal ──→ node-pty (bash/zsh)
+    │
+    └── WebSocket /ws/voice ──→ Volcano ASR ──→ text ──→ PTY
+                                   (optional)
+
+Server: Node.js + node-pty + xterm-headless (session persistence)
+Tunnel: cloudflared (optional, --tunnel flag)
 ```
 
-## Prerequisites
+## Contributing
 
-- [Bun](https://bun.sh) >= 1.0
-- [ttyd](https://github.com/tsl0922/ttyd) - `brew install ttyd`
-- Python 3 with `websockets` package (or use shared_venv)
-- Volcano Engine account with BigModel TTS/ASR enabled
+Contributions welcome! Please open an issue first to discuss what you'd like to change.
 
-## Setup
+## License
 
-1. Install dependencies:
-```bash
-bun install
-```
-
-2. Configure environment:
-```bash
-cp .env.example .env
-# Edit .env with your Volcano Engine credentials
-```
-
-3. Start the server:
-```bash
-bun run start
-```
-
-4. Open http://localhost:3000 in your browser
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `VOLCANO_APP_ID` | Volcano Engine App ID | - |
-| `VOLCANO_TOKEN` | Volcano Engine Access Token | - |
-| `VOLCANO_VOICE` | TTS voice name | `zh_female_wanwanxiaohe_moon_bigtts` |
-| `PORT` | Web server port | `3000` |
-| `TTYD_PORT` | ttyd terminal port | `7681` |
-| `TTYD_CMD` | Command to run in terminal | `bash` |
-
-## Usage
-
-### Voice Input (ASR)
-- Press and hold the microphone button to record
-- Release to send audio for recognition
-- Recognized text is sent to the terminal
-
-### Voice Output (TTS)
-- Type text in the input field and click "Speak"
-- Or use the API: `POST /api/tts` with `{"text": "Hello"}`
-
-### API Endpoints
-
-- `GET /health` - Health check
-- `POST /api/tts` - Text-to-speech (returns WAV audio)
-- `POST /api/asr` - Speech-to-text (accepts audio file)
-- `WS /ws/voice` - Real-time voice WebSocket
-
-## Development
-
-```bash
-bun run dev  # Hot reload
-```
-
-## Credits
-
-- Voice code adapted from [ghaa](../ghaa) project
-- Terminal backend: [ttyd](https://github.com/tsl0922/ttyd)
-- TTS/ASR: [Volcano Engine BigModel](https://www.volcengine.com)
+[MIT](LICENSE)

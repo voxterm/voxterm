@@ -44,11 +44,15 @@
       voiceWs.onmessage = (e) => {
         if (e.data instanceof Blob) { new Audio(URL.createObjectURL(e.data)).play(); return; }
         const d = JSON.parse(e.data);
-        if (d.type === 'asr' && d.text) {
-          text.textContent = 'Recognized: ' + d.text;
-          // Copy to clipboard - user can paste with Cmd+V
+        if (d.type === 'asr_partial' && d.text) {
+          text.textContent = d.text + '...';
+        } else if (d.type === 'asr' && d.text) {
+          text.textContent = d.text;
           navigator.clipboard.writeText(d.text);
           status.textContent = 'Copied! Press Cmd+V in terminal';
+          setTimeout(() => { status.textContent = isMobile ? 'Hold here to speak' : 'Hold Ctrl to speak'; }, 3000);
+        } else if (d.type === 'error') {
+          status.textContent = 'Error: ' + d.message;
           setTimeout(() => { status.textContent = isMobile ? 'Hold here to speak' : 'Hold Ctrl to speak'; }, 3000);
         }
       };
@@ -69,7 +73,10 @@
         const data = audio.getChannelData(0);
         const pcm = new Int16Array(data.length);
         for (let i = 0; i < data.length; i++) pcm[i] = Math.max(-1, Math.min(1, data[i])) * (data[i] < 0 ? 0x8000 : 0x7FFF);
-        if (voiceWs?.readyState === 1) voiceWs.send(pcm.buffer);
+        if (voiceWs?.readyState === 1) {
+          voiceWs.send(pcm.buffer);
+          voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+        }
         status.textContent = 'Processing...';
       };
     }
@@ -77,6 +84,7 @@
     function startRec() {
       if (!mediaRecorder || isRecording) return;
       audioChunks = [];
+      if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_start' }));
       mediaRecorder.start(100);
       isRecording = true;
       status.textContent = 'Recording...';

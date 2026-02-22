@@ -1,18 +1,36 @@
 {
-  "name": "voice-terminal",
+  "name": "voxterm",
+  "version": "1.0.0",
+  "description": "Share your terminal over the web, with voice control",
   "module": "src/server.ts",
   "type": "module",
-  "private": true,
+  "bin": {
+    "voxterm": "src/server-node.ts"
+  },
   "scripts": {
     "start": "npx tsx src/server-node.ts",
-    "start:multi": "npx tsx src/server-multiuser.ts",
+    "start:tunnel": "npx tsx src/server-node.ts --tunnel",
     "dev": "npx tsx --watch src/server-node.ts",
-    "test": "bun run src/test-all.ts",
-    "test:tts": "bun run src/test-tts.ts",
-    "test:asr": "bun run src/test-asr.ts",
-    "test:server": "bun run src/test-server.ts",
-    "test:e2e": "bun run src/test-e2e.ts"
+    "test": "bun run src/test-all.ts"
   },
+  "keywords": [
+    "terminal",
+    "web-terminal",
+    "voice",
+    "speech-to-text",
+    "xterm",
+    "pty",
+    "cloudflare-tunnel",
+    "remote-access",
+    "voxterm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/voxterm/voxterm"
+  },
+  "homepage": "https://github.com/voxterm/voxterm",
+  "author": "Jack Huang",
+  "license": "MIT",
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^25.2.2",
