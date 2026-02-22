@@ -145,34 +145,43 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
   });
 
   volcanoWs.on('message', (data: Buffer) => {
-    const parsed = parseAsrResponse(Buffer.from(data));
-    if (parsed.msgType === 15) {
-      // Error
-      console.error('ASR server error:', parsed.result || parsed.error);
-      clientWs.send(JSON.stringify({ type: 'error', message: 'ASR server error' }));
-      return;
-    }
-    if (parsed.msgType === 9 && parsed.result?.result) {
-      const res = parsed.result.result;
-      const text = (res.text || '').trim().replace(/[.。]$/, '');
-      if (text) {
-        const utterances = res.utterances || [];
-        const definite = utterances.length > 0 && utterances[0].definite;
-        // Send partial results for live feedback, and final result
-        clientWs.send(JSON.stringify({
-          type: definite ? 'asr' : 'asr_partial',
-          text,
-        }));
-        if (definite) {
-          console.log(`ASR final: "${text}"`);
+    try {
+      const parsed = parseAsrResponse(Buffer.from(data));
+      if (parsed.msgType === 15) {
+        console.error('ASR server error:', parsed.result || parsed.error);
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify({ type: 'error', message: 'ASR server error' }));
+        }
+        return;
+      }
+      if (parsed.msgType === 9 && parsed.result?.result) {
+        const res = parsed.result.result;
+        const text = (res.text || '').trim().replace(/[.。]$/, '');
+        if (text && clientWs.readyState === WebSocket.OPEN) {
+          const utterances = res.utterances || [];
+          const definite = utterances.length > 0 && utterances[0].definite;
+          // Always send the full cumulative text; client decides when to submit
+          clientWs.send(JSON.stringify({
+            type: definite ? 'asr' : 'asr_partial',
+            text,
+          }));
+          if (definite) {
+            console.log(`ASR final: "${text}"`);
+          }
         }
       }
+    } catch (e) {
+      console.error('ASR response error:', (e as Error).message);
     }
   });
 
   volcanoWs.on('error', (err) => {
     console.error('ASR WebSocket error:', err.message);
-    clientWs.send(JSON.stringify({ type: 'error', message: 'ASR connection error' }));
+    try {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({ type: 'error', message: 'ASR connection error' }));
+      }
+    } catch {}
   });
 
   volcanoWs.on('close', () => {
@@ -429,41 +438,55 @@ const indexHtml = `<!DOCTYPE html>
     .font-btn:hover { background: #444; }
     #font-size { color: #888; font-size: 12px; min-width: 36px; text-align: center; }
     #font-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-    #back-btn { color: #4ade80; font-size: 13px; text-decoration: none; padding: 6px 10px; background: #1a1a2e; border-radius: 6px; white-space: nowrap; flex-shrink: 0; }
+    #back-btn { color: #4ade80; font-size: 11px; text-decoration: none; padding: 4px 6px; background: #1a1a2e; border-radius: 6px; white-space: nowrap; flex-shrink: 0; }
     .key-btn { background: #333; border: none; color: #fff; min-width: 40px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: system-ui; -webkit-tap-highlight-color: transparent; flex-shrink: 0; padding: 0 8px; }
     .key-btn:active { background: #4ade80; color: #000; }
-    #special-keys { display: none; align-items: center; gap: 4px; flex-shrink: 0; }
-    #mobile-input { display: none; }
+    #special-keys { display: none; align-items: center; gap: 4px; flex: 1; }
+    #bar-row1 { display: contents; }
+    #bar-row2 { display: contents; }
     #scroll-bottom { background: #333; border: none; color: #fff; min-width: 36px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 16px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; padding: 0; }
     #scroll-bottom:active { background: #4ade80; color: #000; }
-    body.mobile #voice-bar { padding: 8px 8px; gap: 6px; flex-wrap: wrap; }
-    body.mobile #status { font-size: 12px; padding: 6px 8px; }
-    body.mobile #text { display: none; }
+    #copy-overlay { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 100; background: #1a1a2e; color: #e0e0e0; font-family: Menlo, Monaco, "Courier New", monospace; font-size: 12px; padding: 8px; border: none; resize: none; white-space: pre; overflow: auto; -webkit-user-select: text; user-select: text; }
+    #copy-overlay.active { display: block; }
+    body.mobile #voice-bar { padding: 6px 6px; gap: 0; flex-direction: column; }
+    body.mobile #bar-row1 { display: flex; align-items: center; gap: 4px; width: 100%; }
+    body.mobile #bar-row2 { display: flex; align-items: center; width: 100%; margin-top: 5px; }
     body.mobile #special-keys { display: flex; }
-    body.mobile #mobile-input { display: block; flex: 1; min-width: 80px; height: 36px; padding: 0 10px; font-size: 14px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #e0e0e0; font-family: system-ui; outline: none; }
-    body.mobile #mobile-input:focus { border-color: #4ade80; }
+    body.mobile #status { font-size: 13px; padding: 8px; flex: 1; text-align: center; border-radius: 8px; }
+    body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
+    body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 12px; }
+    body.mobile #back-btn { padding: 4px 5px; font-size: 10px; }
+    body.mobile #scroll-bottom { min-width: 34px; height: 34px; font-size: 14px; }
   </style>
 </head>
 <body>
   <div id="container">
     <div id="terminal"></div>
+    <textarea id="copy-overlay" readonly></textarea>
     <div id="voice-bar">
-      <a href="/terminal" id="back-btn">Sessions</a>
-      <div id="special-keys">
-        <button class="key-btn" data-key="esc">Esc</button>
-        <button class="key-btn" data-key="tab">Tab</button>
-        <button class="key-btn" data-key="up">↑</button>
-        <button class="key-btn" data-key="down">↓</button>
+      <div id="bar-row1">
+        <a href="/terminal" id="back-btn">Sess</a>
+        <div id="special-keys">
+          <button class="key-btn" data-key="esc">Esc</button>
+          <button class="key-btn" data-key="tab">Tab</button>
+          <button class="key-btn" data-key="up">&#x25B2;</button>
+          <button class="key-btn" data-key="down">&#x25BC;</button>
+          <button class="key-btn" data-key="1">1</button>
+          <button class="key-btn" data-key="2">2</button>
+          <button class="key-btn" data-key="3">3</button>
+          <button class="key-btn" id="copy-btn">Sel</button>
+        </div>
+        <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
+        <div id="font-controls">
+          <button class="font-btn" onclick="changeFontSize(-2)">&#x2212;</button>
+          <span id="font-size">21px</span>
+          <button class="font-btn" onclick="changeFontSize(2)">+</button>
+        </div>
       </div>
-      <input type="text" id="mobile-input" placeholder="Type here..." autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" enterkeyhint="send">
-      <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
-      <div id="status">Hold Option to speak</div>
-      <div id="text"></div>
-      <div id="font-controls">
-        <button class="font-btn" onclick="changeFontSize(-2)">−</button>
-        <span id="font-size">21px</span>
-        <button class="font-btn" onclick="changeFontSize(2)">+</button>
+      <div id="bar-row2">
+        <div id="status">Hold Option to speak</div>
+        <div id="text"></div>
       </div>
     </div>
   </div>
@@ -565,8 +588,8 @@ const indexHtml = `<!DOCTYPE html>
       }, 300);
     });
 
-    // Special key buttons (Esc, Tab, Up, Down) for mobile
-    var keyMap = { esc: String.fromCharCode(27), tab: String.fromCharCode(9), up: String.fromCharCode(27) + '[A', down: String.fromCharCode(27) + '[B' };
+    // Special key buttons for mobile
+    var keyMap = { esc: String.fromCharCode(27), tab: String.fromCharCode(9), up: String.fromCharCode(27) + '[A', down: String.fromCharCode(27) + '[B', '1': '1', '2': '2', '3': '3' };
     document.querySelectorAll('.key-btn').forEach(function(btn) {
       btn.addEventListener('click', function(e) {
         e.preventDefault();
@@ -576,20 +599,6 @@ const indexHtml = `<!DOCTYPE html>
       });
     });
 
-    // Mobile text input - bypasses xterm's broken mobile keyboard handling
-    var mobileInput = document.getElementById('mobile-input');
-    if (mobileInput) {
-      mobileInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          var val = mobileInput.value;
-          if (val) {
-            sendInput(val + String.fromCharCode(13));
-            mobileInput.value = '';
-          }
-        }
-      });
-    }
 
     // Scroll to bottom button
     document.getElementById('scroll-bottom').addEventListener('click', function(e) {
@@ -598,11 +607,55 @@ const indexHtml = `<!DOCTYPE html>
       term.focus();
     });
 
+    // Select/Copy mode: show terminal text in a selectable overlay
+    var copyOverlay = document.getElementById('copy-overlay');
+    var copyBtn = document.getElementById('copy-btn');
+    copyBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      if (copyOverlay.classList.contains('active')) {
+        // Close overlay
+        copyOverlay.classList.remove('active');
+        copyBtn.textContent = 'Sel';
+        copyBtn.style.background = '';
+        term.focus();
+      } else {
+        // Extract visible terminal text from buffer
+        var buf = term.buffer.active;
+        var lines = [];
+        for (var i = 0; i < buf.length; i++) {
+          var line = buf.getLine(i);
+          if (line) lines.push(line.translateToString(true));
+        }
+        copyOverlay.value = lines.join(String.fromCharCode(10));
+        copyOverlay.classList.add('active');
+        copyOverlay.scrollTop = copyOverlay.scrollHeight;
+        copyBtn.textContent = 'Back';
+        copyBtn.style.background = '#4ade80';
+        copyBtn.style.color = '#000';
+      }
+    });
+
     // Voice setup - streaming ASR (sends PCM in real-time)
     const status = document.getElementById('status');
     const text = document.getElementById('text');
     let voiceWs, audioStream, audioContext, sourceNode, processorNode;
     let isRecording = false, audioReady = false;
+    var pendingAsrText = ''; // Accumulate ASR text, send only when recording ends
+    var asrFlushed = false; // Prevent flushing more than once per recording
+
+    function flushAsrText() {
+      if (asrFlushed) return;
+      if (pendingAsrText && termWs && termWs.readyState === 1) {
+        asrFlushed = true;
+        text.textContent = pendingAsrText;
+        status.textContent = 'Sending to terminal...';
+        termWs.send(JSON.stringify({ type: 'asr', text: pendingAsrText }));
+        setTimeout(function() { status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak'; }, 2000);
+      } else {
+        status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+      }
+      pendingAsrText = '';
+    }
 
     function connectVoice() {
       voiceWs = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/terminal/ws-voice');
@@ -610,53 +663,74 @@ const indexHtml = `<!DOCTYPE html>
         const d = JSON.parse(e.data);
         if (d.type === 'asr' && d.text) {
           clearTimeout(processingTimeout);
+          pendingAsrText = d.text;
           text.textContent = d.text;
-          status.textContent = 'Sending to terminal...';
-          if (termWs.readyState === 1) {
-            termWs.send(JSON.stringify({ type: 'asr', text: d.text }));
+          // Don't send to terminal yet - wait for recording to fully end
+          // If recording already ended (Processing state), flush now
+          if (!isRecording && !stopRecTimer) {
+            flushAsrText();
           }
-          setTimeout(() => { status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak'; }, 2000);
         } else if (d.type === 'asr_partial' && d.text) {
+          pendingAsrText = d.text;
           text.textContent = d.text;
         }
       };
       voiceWs.onclose = () => {
-        // Reset recording state so we don't get stuck on "Processing..."
-        if (isRecording || status.textContent === 'Processing...') {
-          isRecording = false;
-          status.classList.remove('recording');
+        // Reset all recording state
+        clearTimeout(stopRecTimer);
+        stopRecTimer = null;
+        isRecording = false;
+        releaseMic();
+        status.classList.remove('recording');
+        if (status.textContent === 'Processing...' || status.textContent === 'Finishing...' || status.textContent === 'Recording...') {
           status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
         }
         setTimeout(connectVoice, 2000);
       };
     }
 
-    async function initAudio() {
-      audioStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
-      audioContext = new AudioContext({ sampleRate: 16000 });
-      sourceNode = audioContext.createMediaStreamSource(audioStream);
-      // ScriptProcessor: buffer 4096 samples, 1 input channel, 1 output channel
-      processorNode = audioContext.createScriptProcessor(4096, 1, 1);
-      processorNode.onaudioprocess = function(e) {
-        if (!isRecording || !voiceWs || voiceWs.readyState !== 1) return;
-        var input = e.inputBuffer.getChannelData(0);
-        var pcm = new Int16Array(input.length);
-        for (var i = 0; i < input.length; i++) {
-          pcm[i] = Math.max(-1, Math.min(1, input[i])) * (input[i] < 0 ? 0x8000 : 0x7FFF);
-        }
-        voiceWs.send(pcm.buffer);
-      };
-      // Keep processor connected but only send when isRecording
-      sourceNode.connect(processorNode);
-      processorNode.connect(audioContext.destination);
-      audioReady = true;
+    async function acquireMic() {
+      if (audioReady) return true;
+      try {
+        audioStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        sourceNode = audioContext.createMediaStreamSource(audioStream);
+        processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        processorNode.onaudioprocess = function(e) {
+          if (!isRecording || !voiceWs || voiceWs.readyState !== 1) return;
+          var input = e.inputBuffer.getChannelData(0);
+          var pcm = new Int16Array(input.length);
+          for (var i = 0; i < input.length; i++) {
+            pcm[i] = Math.max(-1, Math.min(1, input[i])) * (input[i] < 0 ? 0x8000 : 0x7FFF);
+          }
+          voiceWs.send(pcm.buffer);
+        };
+        sourceNode.connect(processorNode);
+        processorNode.connect(audioContext.destination);
+        audioReady = true;
+        return true;
+      } catch (e) {
+        status.textContent = 'Mic error';
+        return false;
+      }
     }
 
-    function startRec() {
-      if (!audioReady || isRecording) return;
+    function releaseMic() {
+      audioReady = false;
+      if (sourceNode) { try { sourceNode.disconnect(); } catch {} sourceNode = null; }
+      if (processorNode) { try { processorNode.disconnect(); } catch {} processorNode = null; }
+      if (audioStream) { audioStream.getTracks().forEach(function(t) { t.stop(); }); audioStream = null; }
+      if (audioContext) { try { audioContext.close(); } catch {} audioContext = null; }
+    }
+
+    async function startRec() {
+      if (isRecording) return;
+      var ok = await acquireMic();
+      if (!ok) return;
       if (audioContext.state === 'suspended') audioContext.resume();
       isRecording = true;
-      // Tell server to start ASR session
+      asrFlushed = false;
+      pendingAsrText = '';
       if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_start' }));
       status.textContent = 'Recording...';
       status.classList.add('recording');
@@ -664,20 +738,31 @@ const indexHtml = `<!DOCTYPE html>
     }
 
     var processingTimeout = null;
+    var stopRecTimer = null;
+    var stopRecRequestedAt = 0;
     function stopRec() {
       if (!isRecording) return;
-      isRecording = false;
-      // Tell server to finalize ASR
-      if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
-      status.classList.remove('recording');
-      status.textContent = 'Processing...';
-      // Safety timeout: reset if no ASR result within 10s
-      clearTimeout(processingTimeout);
-      processingTimeout = setTimeout(function() {
-        if (status.textContent === 'Processing...') {
-          status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
-        }
-      }, 10000);
+      // Keep recording for 1000ms to capture trailing sound, then finalize
+      if (!stopRecTimer) {
+        stopRecRequestedAt = Date.now();
+        status.textContent = 'Finishing...';
+        status.classList.remove('recording');
+        stopRecTimer = setTimeout(function() {
+          stopRecTimer = null;
+          if (!isRecording) return;
+          isRecording = false;
+          if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+          releaseMic();
+          status.textContent = 'Processing...';
+          clearTimeout(processingTimeout);
+          processingTimeout = setTimeout(function() {
+            // Safety: if no final ASR result after 10s, flush whatever we have
+            if (status.textContent === 'Processing...') {
+              flushAsrText();
+            }
+          }, 10000);
+        }, 1000);
+      }
     }
 
     let altDown = false, altDownTime = 0, altCombined = false;
@@ -709,8 +794,7 @@ const indexHtml = `<!DOCTYPE html>
             status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
           }
         } else {
-          // Delay 500ms to capture trailing sound
-          setTimeout(() => stopRec(), 500);
+          stopRec();
         }
         e.preventDefault();
         e.stopPropagation();
@@ -725,10 +809,9 @@ const indexHtml = `<!DOCTYPE html>
     const fontControls = document.getElementById('font-controls');
     const backBtn = document.getElementById('back-btn');
     var specialKeys = document.getElementById('special-keys');
-    var mobileInputEl = document.getElementById('mobile-input');
     var scrollBtn = document.getElementById('scroll-bottom');
     function isExcluded(el) {
-      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (specialKeys && specialKeys.contains(el)) || el === mobileInputEl || el === scrollBtn;
+      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (specialKeys && specialKeys.contains(el)) || el === scrollBtn;
     }
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
@@ -739,17 +822,12 @@ const indexHtml = `<!DOCTYPE html>
     voiceBar.addEventListener('touchend', (e) => {
       if (isExcluded(e.target)) return;
       e.preventDefault();
-      // Delay 500ms to capture trailing sound
-      setTimeout(() => {
-        stopRec();
-        voiceBar.classList.remove('recording');
-      }, 200);
+      stopRec();
+      voiceBar.classList.remove('recording');
     }, { passive: false });
     voiceBar.addEventListener('touchcancel', () => {
-      setTimeout(() => {
-        stopRec();
-        voiceBar.classList.remove('recording');
-      }, 200);
+      stopRec();
+      voiceBar.classList.remove('recording');
     });
 
     // Update status text for mobile
@@ -759,7 +837,6 @@ const indexHtml = `<!DOCTYPE html>
 
     term.focus();
     connectVoice();
-    initAudio();
   </script>
 </body>
 </html>`;
@@ -937,39 +1014,46 @@ voiceWss.on('connection', (ws) => {
   let asrSession: AsrSession | null = null;
 
   ws.on('message', (message) => {
-    if (typeof message === 'string' || (message instanceof Buffer && message[0] === 0x7b)) {
-      // JSON control message
-      const msg = JSON.parse(message.toString());
-      if (msg.type === 'asr_start') {
-        // Start a new streaming ASR session
-        if (asrSession?.volcanoWs) {
-          try { asrSession.volcanoWs.close(); } catch {}
+    try {
+      // Detect JSON control messages: must be a string type, or a short Buffer starting with '{'
+      const isJson = typeof message === 'string' ||
+        (message instanceof Buffer && message.length < 512 && message[0] === 0x7b);
+      if (isJson) {
+        const msg = JSON.parse(message.toString());
+        if (msg.type === 'asr_start') {
+          // Start a new streaming ASR session
+          if (asrSession?.volcanoWs) {
+            try { asrSession.volcanoWs.close(); } catch {}
+          }
+          asrSession = startAsrSession(ws);
+          console.log(`ASR streaming started for ${id}`);
+        } else if (msg.type === 'asr_end') {
+          // Send empty final chunk to signal end of audio
+          if (asrSession) {
+            if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
+              asrSession.volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
+              console.log(`ASR streaming ended for ${id}`);
+            } else {
+              // Volcano not ready yet - mark pending end so it's sent after flush
+              asrSession.pendingChunks.push(Buffer.alloc(0)); // sentinel for final
+              console.log(`ASR end queued (Volcano not ready yet) for ${id}`);
+            }
+          }
         }
-        asrSession = startAsrSession(ws);
-        console.log(`ASR streaming started for ${id}`);
-      } else if (msg.type === 'asr_end') {
-        // Send empty final chunk to signal end of audio
+      } else if (message instanceof Buffer) {
+        // Binary = raw PCM audio chunk, forward to Volcano
         if (asrSession) {
           if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
-            asrSession.volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
-            console.log(`ASR streaming ended for ${id}`);
+            asrSession.volcanoWs.send(buildAudioRequest(message, false));
           } else {
-            // Volcano not ready yet - mark pending end so it's sent after flush
-            asrSession.pendingChunks.push(Buffer.alloc(0)); // sentinel for final
-            console.log(`ASR end queued (Volcano not ready yet) for ${id}`);
+            // Buffer chunks while Volcano WebSocket is still connecting
+            asrSession.pendingChunks.push(Buffer.from(message));
           }
         }
       }
-    } else if (message instanceof Buffer) {
-      // Binary = raw PCM audio chunk, forward to Volcano
-      if (asrSession) {
-        if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
-          asrSession.volcanoWs.send(buildAudioRequest(message, false));
-        } else {
-          // Buffer chunks while Volcano WebSocket is still connecting
-          asrSession.pendingChunks.push(Buffer.from(message));
-        }
-      }
+    } catch (e) {
+      // Don't let parse errors kill the voice connection
+      console.error(`Voice message error for ${id}:`, (e as Error).message);
     }
   });
 
