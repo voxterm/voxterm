@@ -26,7 +26,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 import xtermHeadless from '@xterm/headless';
 const HeadlessTerminal = xtermHeadless.Terminal;
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -35,8 +35,48 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = parseInt(process.env.PORT || '3000');
-const PASSWORD = process.env.AUTH_PASSWORD || 'success1000';
+const PASSWORD = process.env.AUTH_PASSWORD;
+if (!PASSWORD) {
+  console.error('ERROR: AUTH_PASSWORD environment variable is required. Set it before starting the server.');
+  console.error('  Example: AUTH_PASSWORD=your-secret-password npx tsx src/server-node.ts');
+  process.exit(1);
+}
 const AUTH_TOKEN = 'voice_terminal_auth_' + Buffer.from(PASSWORD).toString('base64');
+
+// --- Rate limiting for login attempts ---
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const loginAttempts = new Map<string, { count: number; firstAttempt: number }>();
+
+function getClientIp(req: http.IncomingMessage): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function isRateLimited(ip: string): boolean {
+  const record = loginAttempts.get(ip);
+  if (!record) return false;
+  // Reset if window expired
+  if (Date.now() - record.firstAttempt > LOGIN_WINDOW_MS) {
+    loginAttempts.delete(ip);
+    return false;
+  }
+  return record.count >= LOGIN_MAX_ATTEMPTS;
+}
+
+function recordFailedLogin(ip: string): void {
+  const record = loginAttempts.get(ip);
+  if (!record || Date.now() - record.firstAttempt > LOGIN_WINDOW_MS) {
+    loginAttempts.set(ip, { count: 1, firstAttempt: Date.now() });
+  } else {
+    record.count++;
+  }
+}
+
+function clearLoginAttempts(ip: string): void {
+  loginAttempts.delete(ip);
+}
 
 // Voice/ASR config
 const VOLCANO_APP_ID = process.env.VOLCANO_APP_ID || '';
@@ -302,9 +342,9 @@ const loginHtml = `<!DOCTYPE html>
         .then(r => r.json())
         .then(d => {
           if (d.success) {
-            document.cookie = 'auth=' + d.token + '; path=/; max-age=86400';
             location.reload();
           } else {
+            document.getElementById('error').textContent = d.error || 'Incorrect password';
             document.getElementById('error').style.display = 'block';
           }
         });
@@ -865,18 +905,10 @@ function isAuthenticated(req: http.IncomingMessage): boolean {
 
 // HTTP server
 const server = http.createServer((req, res) => {
-  // CORS headers for cross-origin requests
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200);
-    res.end();
-    return;
-  }
+  // Security headers
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;");
 
   // Only log non-routine requests
   if (req.url !== '/health' && !req.url?.startsWith('/terminal?session=')) {
@@ -891,6 +923,12 @@ const server = http.createServer((req, res) => {
 
   // Handle login POST (accept both direct and proxy-rewritten paths)
   if ((req.url === '/login' || req.url === '/terminal/login') && req.method === 'POST') {
+    const clientIp = getClientIp(req);
+    if (isRateLimited(clientIp)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Too many login attempts. Try again later.' }));
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
@@ -898,12 +936,16 @@ const server = http.createServer((req, res) => {
         const body = Buffer.concat(chunks).toString();
         const { password } = JSON.parse(body);
         if (password === PASSWORD) {
+          clearLoginAttempts(clientIp);
+          const isSecure = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any).encrypted;
+          const securePart = isSecure ? ' Secure;' : '';
           res.writeHead(200, {
             'Content-Type': 'application/json',
-            'Set-Cookie': `auth=${AUTH_TOKEN}; Path=/; Max-Age=86400; SameSite=Lax`
+            'Set-Cookie': `auth=${AUTH_TOKEN}; Path=/; Max-Age=86400; SameSite=Lax; HttpOnly;${securePart}`
           });
-          res.end(JSON.stringify({ success: true, token: AUTH_TOKEN }));
+          res.end(JSON.stringify({ success: true }));
         } else {
+          recordFailedLogin(clientIp);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false }));
         }
@@ -932,7 +974,7 @@ const server = http.createServer((req, res) => {
 
   // Create new session: /terminal?action=new
   if (action === 'new') {
-    const id = 'sess_' + Math.random().toString(36).substring(2, 10);
+    const id = 'sess_' + randomBytes(12).toString('hex');
     createSession(id);
     res.writeHead(302, { 'Location': '/terminal?session=' + encodeURIComponent(id) });
     res.end();
@@ -1068,7 +1110,12 @@ voiceWss.on('connection', (ws) => {
 
 // Handle WebSocket upgrade
 server.on('upgrade', (request, socket, head) => {
-  // Skip auth check for WebSocket (browsers don't auto-send cookies on WS)
+  // Verify authentication before allowing WebSocket upgrade
+  if (!isAuthenticated(request)) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
   const url = new URL(request.url!, `http://${request.headers.host}`);
 
   // Accept both direct paths and proxy-rewritten paths:
