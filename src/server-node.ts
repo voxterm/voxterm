@@ -383,7 +383,7 @@ function buildSessionsHtml(): string {
       const cl = s.clients === 0 ? 'idle' : s.clients === 1 ? '1 client' : s.clients + ' clients';
       const badgeClass = s.clients > 0 ? ' active' : '';
       cardsHtml += `<a class="session-card" href="/terminal?session=${encodeURIComponent(s.id)}">
-        <div class="session-info"><div class="session-name">${esc(s.name)}</div>
+        <div class="session-info"><div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span><button class="rename-btn" title="Rename session">&#9998;</button></div>
         <div class="session-meta">Created ${fmtAge(s.createdAt)}</div></div>
         <span class="session-badge${badgeClass}">${cl}</span></a>`;
     }
@@ -426,6 +426,23 @@ function buildSessionsHtml(): string {
       background: #1a1a2e; color: #888; white-space: nowrap; margin-left: 12px;
     }
     .session-badge.active { background: #4ade80; color: #000; }
+    .session-name { display: flex; align-items: center; gap: 8px; }
+    .rename-btn {
+      background: none; border: 1px solid #444; color: #888; border-radius: 4px;
+      cursor: pointer; font-size: 13px; padding: 1px 5px; line-height: 1;
+      opacity: 0; transition: opacity 0.15s;
+      flex-shrink: 0;
+    }
+    .session-card:hover .rename-btn { opacity: 1; }
+    .rename-btn:hover { color: #4ade80; border-color: #4ade80; }
+    .session-name-input {
+      background: #1a1a2e; color: #e0e0e0; border: 1px solid #4ade80; border-radius: 4px;
+      font-size: inherit; font-weight: inherit; font-family: inherit; padding: 2px 6px;
+      width: 100%; outline: none;
+    }
+    @media (max-width: 500px) {
+      .rename-btn { opacity: 1; }
+    }
     .empty-state { text-align: center; padding: 60px 20px; color: #666; }
     .empty-state p { margin-bottom: 16px; font-size: 18px; }
     @media (max-width: 500px) {
@@ -445,6 +462,71 @@ function buildSessionsHtml(): string {
     </div>
     <div class="session-list">${cardsHtml}</div>
   </div>
+  <script>
+    function startRename(nameEl) {
+      if (nameEl.querySelector('input')) return;
+      var textSpan = nameEl.querySelector('.session-name-text');
+      var renameBtn = nameEl.querySelector('.rename-btn');
+      var name = textSpan ? textSpan.textContent : nameEl.textContent;
+      var sessionId = nameEl.getAttribute('data-session');
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'session-name-input';
+      input.value = name;
+      nameEl.textContent = '';
+      nameEl.appendChild(input);
+      input.focus();
+      input.select();
+      function restore(text) {
+        nameEl.textContent = '';
+        var span = document.createElement('span');
+        span.className = 'session-name-text';
+        span.textContent = text;
+        nameEl.appendChild(span);
+        var btn = document.createElement('button');
+        btn.className = 'rename-btn';
+        btn.title = 'Rename session';
+        btn.innerHTML = '&#9998;';
+        nameEl.appendChild(btn);
+      }
+      function save() {
+        var newName = input.value.trim();
+        if (!newName || newName === name) {
+          restore(name);
+          return;
+        }
+        fetch('/terminal/rename', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session: sessionId, name: newName })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          restore(d.success ? newName : name);
+        }).catch(function() { restore(name); });
+      }
+      input.addEventListener('click', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
+      input.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+        if (ev.key === 'Escape') { ev.preventDefault(); restore(name); }
+      });
+      input.addEventListener('blur', save);
+    }
+    document.querySelectorAll('.session-card').forEach(function(card) {
+      card.addEventListener('click', function(e) {
+        var nameEl = card.querySelector('.session-name');
+        if (!nameEl) return;
+        var target = e.target;
+        // Click on rename button or session name text triggers rename
+        if (target.classList.contains('rename-btn') || target.classList.contains('session-name-text')) {
+          e.preventDefault();
+          startRename(nameEl);
+        }
+        // Click on input inside name — just prevent navigation
+        if (target.classList.contains('session-name-input')) {
+          e.preventDefault();
+        }
+      });
+    });
+  </script>
 </body>
 </html>`;
   sessionsHtmlCache = html;
@@ -553,6 +635,13 @@ const indexHtml = `<!DOCTYPE html>
     term.open(document.getElementById('terminal'));
     fitAddon.fit();
 
+    // Auto-scroll tracking: follow output unless user scrolled up
+    var autoScroll = true;
+    term.onScroll(function() {
+      var buf = term.buffer.active;
+      autoScroll = buf.viewportY >= buf.baseY;
+    });
+
     function changeFontSize(delta) {
       fontSize = Math.max(10, Math.min(40, fontSize + delta));
       term.options.fontSize = fontSize;
@@ -577,7 +666,9 @@ const indexHtml = `<!DOCTYPE html>
       termWs = new WebSocket(wsUrl);
       termWs.onmessage = (e) => {
         const msg = JSON.parse(e.data);
-        if (msg.type === 'scrollback') {
+        if (msg.type === 'session_info') {
+          document.title = msg.name + ' - Voice Terminal';
+        } else if (msg.type === 'scrollback') {
           // Scrollback replay: write with terminal hidden to avoid visual flicker
           const termEl = document.getElementById('terminal');
           termEl.style.visibility = 'hidden';
@@ -587,7 +678,9 @@ const indexHtml = `<!DOCTYPE html>
             term.scrollToBottom();
           });
         } else if (msg.type === 'output') {
-          term.write(msg.data);
+          term.write(msg.data, function() {
+            if (autoScroll) term.scrollToBottom();
+          });
         }
       };
       termWs.onopen = () => {
@@ -643,6 +736,7 @@ const indexHtml = `<!DOCTYPE html>
     // Scroll to bottom button
     document.getElementById('scroll-bottom').addEventListener('click', function(e) {
       e.preventDefault();
+      autoScroll = true;
       term.scrollToBottom();
       term.focus();
     });
@@ -958,6 +1052,43 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Handle session rename POST (requires authentication)
+  if ((req.url === '/rename' || req.url === '/terminal/rename') && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      try {
+        const { session, name } = JSON.parse(Buffer.concat(chunks).toString());
+        const s = sessions.get(session);
+        if (!s) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Session not found' }));
+          return;
+        }
+        const trimmed = (name || '').trim().substring(0, 100);
+        if (!trimmed) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Name cannot be empty' }));
+          return;
+        }
+        s.name = trimmed;
+        invalidateSessionsCache();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Bad request' }));
+      }
+    });
+    req.resume();
+    return;
+  }
+
   // Check authentication
   const cookies = parseCookies(req.headers.cookie);
   if (cookies.auth !== AUTH_TOKEN) {
@@ -1004,6 +1135,9 @@ terminalWss.on('connection', (ws, req) => {
   session.clients.add(ws);
   invalidateSessionsCache();
   console.log(`Terminal client connected: ${sessionId}`);
+
+  // Send session info (name for tab title)
+  ws.send(JSON.stringify({ type: 'session_info', name: session.name }));
 
   // Send serialized terminal state (current screen + some scrollback) instead of raw replay
   try {
