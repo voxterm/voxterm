@@ -1102,4 +1102,53 @@ server.listen(PORT, () => {
 
 === Server ready ===
 `);
+
+  // Start Cloudflare Tunnel if requested via --tunnel flag or CLOUDFLARE_TUNNEL env
+  const wantTunnel = process.argv.includes('--tunnel') || process.env.CLOUDFLARE_TUNNEL === '1';
+  if (wantTunnel) {
+    startCloudflareTunnel();
+  }
 });
+
+function startCloudflareTunnel() {
+  const tunnelProc = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${PORT}`], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let tunnelUrl = '';
+
+  function parseLine(line: string) {
+    // cloudflared prints the URL like: "https://xxx-yyy-zzz.trycloudflare.com"
+    const match = line.match(/(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/);
+    if (match && !tunnelUrl) {
+      tunnelUrl = match[1];
+      console.log(`
+╔════════════════════════════════════════════════╗
+║         Cloudflare Tunnel Active              ║
+╠════════════════════════════════════════════════╣
+║  Public URL: ${tunnelUrl}
+╚════════════════════════════════════════════════╝
+`);
+    }
+  }
+
+  tunnelProc.stdout.on('data', (data: Buffer) => {
+    data.toString().split('\n').forEach(parseLine);
+  });
+  tunnelProc.stderr.on('data', (data: Buffer) => {
+    data.toString().split('\n').forEach(parseLine);
+  });
+
+  tunnelProc.on('error', (err) => {
+    console.error('Failed to start cloudflared:', err.message);
+    console.error('Install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/');
+  });
+
+  tunnelProc.on('exit', (code) => {
+    console.error(`cloudflared exited with code ${code}`);
+  });
+
+  // Clean up tunnel on server exit
+  process.on('SIGINT', () => { tunnelProc.kill(); process.exit(); });
+  process.on('SIGTERM', () => { tunnelProc.kill(); process.exit(); });
+}
